@@ -15,7 +15,7 @@ class Crewmate(Agent):
             Task("Fix Wiring", (5, 5)),
             Task("Upload Data", (15, 15))
         ]
-        self.suspicions = {}  # {agent_id: suspicion_score}
+        self.suspicion_pairs = {} # {(agent1_id, agent2_id): score}
         self.alive = True
 
     def find_nearest_task(self):
@@ -74,6 +74,27 @@ class Crewmate(Agent):
             task.do_task()
             if task.complete:
                 print(f"Agent {self.unique_id} completed {task.name}!")
+    
+    def update_suspicions(self, visible_agents):
+        """Update suspicion scores based on visible agent pairs."""
+        # Track all pairs in visible area
+        visible_ids = [a.unique_id for a in visible_agents if a != self]
+        
+        # Create all possible pairs
+        for i in range(len(visible_ids)):
+            for j in range(i+1, len(visible_ids)):
+                pair = frozenset({visible_ids[i], visible_ids[j]})
+                self.suspicion_pairs[pair] = self.suspicion_pairs.get(pair, 0) + 1
+
+    def check_for_bodies(self, visible_agents):
+        """Check for dead agents in visibility and trigger discussion."""
+        for agent in visible_agents:
+            if not agent.alive and self.model.phase == "tasks":
+                print(f"Agent {self.unique_id} found body of {agent.unique_id}!")
+                self.model.reported_body = agent.pos
+                self.model.phase = "discussion"
+                return True
+        return False
 
     def step(self):
         if not self.alive:
@@ -85,11 +106,16 @@ class Crewmate(Agent):
             self.move_toward(task.location)
             self.do_task(task)
         
-        # Update suspicions (simplified)
-        neighbors = self.model.grid.get_neighbors(self.pos, moore=True, radius=self.visibility)
-        for agent in neighbors:
-            if isinstance(agent, Imposter):
-                self.suspicions[agent.unique_id] = self.suspicions.get(agent.unique_id, 0) + 1
+        # Get visible agents
+        visible_agents = self.model.grid.get_neighbors(
+            self.pos, moore=True, radius=self.visibility, include_center=True
+        )
+        
+        # Update suspicion pairs
+        self.update_suspicions(visible_agents)
+        
+        # Check for dead bodies
+        self.check_for_bodies(visible_agents)
 
 
 class Imposter(Agent):
@@ -112,13 +138,11 @@ class Imposter(Agent):
             if len(target_neighbors) == 1:  # Only the imposter is nearby
                 return target
         return None
-
+    
     def kill(self, target):
         """Eliminate a crewmate if isolated."""
         if target.alive and self.is_isolated(target):
             target.alive = False
-            self.model.reported_body = target.pos
-            self.model.phase = "discussion"
             self.kill_cooldown = 5
             print(f"Agent {target.unique_id} was killed!")
 
