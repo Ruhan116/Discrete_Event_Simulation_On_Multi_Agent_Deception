@@ -1,0 +1,16 @@
+--- Simulation Trace Log (2025-05-11 22:52:35.291896) ---
+
+[1.03] agent2 - EventType.MOVE
+[2.29] agent1 - EventType.TASK_START
+[2.69] imposter - EventType.MOVE
+[3.20] agent2 - EventType.TASK_START
+[3.71] imposter - EventType.MOVE
+[5.20] imposter - EventType.KILL
+imposter killed agent1!
+[6.58] agent1 - EventType.MOVE
+[7.06] agent2 - EventType.MOVE
+[8.44] imposter - EventType.MOVE
+[8.94] agent2 - EventType.TASK_START
+[9.76] imposter - EventType.KILL
+imposter killed agent2!
+All crewmates are dead. Imposters win!
