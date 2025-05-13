@@ -31,10 +31,9 @@ class AmongUsModel(Model):
     
     def discussion_step(self):
         """Process pairs containing the reported body, update votes, and clean up"""
-        # Initialize votes only once (persist across rounds)
-        if not hasattr(self, 'votes'):
-            self.votes = {}
-
+        # Reset votes at start of each discussion
+        self.votes = {}
+        
         # Find the dead agent from reported body position
         dead_agent = None
         for agent in self.schedule.agents:
@@ -48,38 +47,21 @@ class AmongUsModel(Model):
             # Process all agents' suspicion pairs containing the dead agent
             for agent in self.schedule.agents:
                 if isinstance(agent, Crewmate) and agent.alive:
-                    pairs_to_remove = []
-
-                    temp_votes = self.votes.copy()
-
                     # Check each pair containing the dead agent
                     for pair in agent.suspicion_pairs:
                         if dead_id in pair:
                             members = list(pair)
                             alive_member = next((m for m in members if m != dead_id), None)
-
+                            
                             if alive_member:
                                 # Find if alive member is still living
                                 alive_agent = next((a for a in self.schedule.agents 
-                                                  if a.unique_id == alive_member and a.alive), None)
-
+                                                if a.unique_id == alive_member and a.alive), None)
+                                
                                 if alive_agent:
                                     # Update vote count with pair score
-                                    temp_votes[alive_member] = temp_votes.get(alive_member, 0) + \
-                                                              agent.suspicion_pairs[pair]
-
-                            # Mark pair for removal
-                            pairs_to_remove.append(pair)
-                    
-                    max_vote = max(temp_votes.values(), default=0)
-                    candidate = [k for k, v in temp_votes.items() if v == max_vote and max_vote > 0]
-                    if candidate:
-                        self.votes[candidate[0]] = self.votes.get(candidate[0], 0) + 1
-                        print(f"Agent {agent.unique_id} votes for {candidate[0]} with max score {max_vote}")
-
-                    # Remove processed pairs
-                    for pair in pairs_to_remove:
-                        del agent.suspicion_pairs[pair]
+                                    self.votes[alive_member] = self.votes.get(alive_member, 0) + \
+                                                            agent.suspicion_pairs[pair]
 
             # Remove dead agent from grid and schedule
             self.grid.remove_agent(dead_agent)
@@ -98,28 +80,35 @@ class AmongUsModel(Model):
                     print(f"Imposter {agent.unique_id} votes for {vote}")
 
         self.phase = "voting"
+        self.discussion_time = 5
 
     def reset_round(self):
-        """Reset round WITHOUT clearing votes"""
+        """Reset round and clear voting data"""
         self.phase = "tasks"
         self.reported_body = None
-        # Do NOT reset self.votes here
+        self.votes = {}  # Now resetting votes each round
+        self.discussion_time = 0
 
     def tally_votes(self):
-        """Eject most-voted agent."""
+        """Eject most-voted agent with proper tie-breaking"""
         if not self.votes:
-            print("No votes cast!")
+            print("No votes cast! Skipping to next round.")
             self.reset_round()
             return
         
         max_votes = max(self.votes.values())
         candidates = [agent_id for agent_id, votes in self.votes.items() if votes == max_votes]
-        ejected_id = random.choice(candidates)
         
+        # If tie, choose randomly among top candidates
+        ejected_id = self.random.choice(candidates) if len(candidates) > 1 else candidates[0]
+        
+        # Find and eject the agent
         for agent in self.schedule.agents:
             if agent.unique_id == ejected_id:
                 agent.alive = False
-                print(f"Agent {ejected_id} was ejected!")
+                # Move ejected agent to a corner for visual indication
+                self.grid.move_agent(agent, (0, 0))
+                print(f"Agent {ejected_id} was ejected with {max_votes} votes!")
                 break
         
         self.reset_round()
@@ -130,7 +119,16 @@ class AmongUsModel(Model):
             # Check if body was reported
             if self.reported_body:
                 self.phase = "discussion"
+                self.discussion_time = 5  # 5 steps for discussion
+        
         elif self.phase == "discussion":
-            self.discussion_step()
+            if self.discussion_time > 0:
+                self.discussion_time -= 1
+                if self.discussion_time == 0:
+                    self.discussion_step()  # Move to voting after discussion
+        
         elif self.phase == "voting":
-            self.tally_votes()
+            if self.discussion_time > 0:
+                self.discussion_time -= 1
+                if self.discussion_time == 0:
+                    self.tally_votes()
