@@ -86,6 +86,7 @@ class AmongUsModel(Model):
         """Process pairs containing the reported body, update votes, and clean up"""
         # Reset votes at start of each discussion
         self.votes = {}
+        self.reported_body = None  # Prevent rediscovery
         
         # Find the dead agent
         dead_agent = next((a for a in self.schedule.agents 
