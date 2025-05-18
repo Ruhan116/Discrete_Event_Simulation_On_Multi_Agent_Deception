@@ -1,0 +1,2 @@
+# Ignore all trace log files
+mesa-env/agent_*_trace.log
