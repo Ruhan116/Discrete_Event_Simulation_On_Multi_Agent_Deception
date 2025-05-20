@@ -158,6 +158,7 @@ class AmongUsModel(Model):
     """
 
     def discussion_step(self):
+        """Process discussion phase with LLM integration"""
         self.votes = {}
 
         # Find dead agent with error handling
@@ -169,62 +170,68 @@ class AmongUsModel(Model):
             self.reset_round()
             return
 
+        # Capture death location BEFORE removal
+        death_location = self.get_room(dead_agent.pos)
+
+        # Remove dead agent properly
+        try:
+            self.grid.remove_agent(dead_agent)
+            self.schedule.remove(dead_agent)
+            if isinstance(dead_agent, Crewmate):
+                dead_agent.close_trace_file()
+        except Exception as e:
+            print(f"Error removing dead agent: {e}")
+
+        # Use captured location instead of dead_agent.pos
         context = {
             'dead_agent_id': dead_agent.unique_id,
-            'death_location': self.get_room(dead_agent.pos),
+            'death_location': death_location,
             'dead_suspicions': dead_agent.suspicion_pairs if isinstance(dead_agent, Crewmate) else {},
             'alive_crewmates': [a.unique_id for a in self.schedule.agents 
                               if isinstance(a, Crewmate) and a.alive]
         }
 
+        # Collect arguments and votes
         for agent in self.schedule.agents:
             if not agent.alive:
                 continue
             
             try:
-                argument = None
-                trace_content = ""
-
                 # Read individual trace file
+                trace_content = ""
                 try:
                     with open(f"agent_{agent.unique_id}_trace.log", "r") as f:
                         trace_content = f.read()[-1000:]  # Get last 1000 characters
                 except FileNotFoundError:
                     pass
 
-                # Generate argument based on agent type
+                # Generate argument
                 argument = agent.generate_argument(self.discussion_manager, context)
 
-                # Process the argument directly here
+                # Process the argument
+                # Inside the agent processing loop of discussion_step()
                 if argument and "suspect" in argument:
                     suspect_str = argument["suspect"].strip()
-                    # Extract numerical ID from string
-                    suspect_id = int(''.join(filter(str.isdigit, suspect_str)))
+                    try:
+                        suspect_id = int(''.join(filter(str.isdigit, suspect_str)))
+                        if any(a.unique_id == suspect_id for a in self.schedule.agents if a.alive):
+                            vote_weight = 1 + int(argument.get("confidence", 0)) // 25
+                            self.votes[suspect_id] = self.votes.get(suspect_id, 0) + vote_weight
+                            
+                            # Add this print statement
+                            print(f"Agent {agent.unique_id} reasoning: {argument.get('reason', 'No reason provided')}")
+                            
+                    except ValueError:
+                        print(f"Invalid suspect ID from Agent {agent.unique_id}: {suspect_str}")
+                    except Exception as e:
+                        print(f"Error processing Agent {agent.unique_id}: {str(e)}")
 
-                    if any(a.unique_id == suspect_id for a in self.schedule.agents if a.alive):
-                        # Calculate vote weight
-                        vote_weight = 1
-                        if "confidence" in argument:
-                            vote_weight += int(argument["confidence"]) // 25
-
-                        # Add heuristic suspicions for crewmates
-                        if isinstance(agent, Crewmate):
-                            heuristic_weight = len([
-                                p for p in agent.suspicion_pairs 
-                                if suspect_id in p and context['dead_agent_id'] in p
-                            ])
-                            vote_weight += heuristic_weight
-
-                        self.votes[suspect_id] = self.votes.get(suspect_id, 0) + vote_weight
-                        print(f"Agent {agent.unique_id} votes for {suspect_id}: {argument.get('reason', '')}")
-
-            except ValueError as e:
-                print(f"Invalid suspect ID from Agent {agent.unique_id}: {argument.get('suspect')}")
             except Exception as e:
-                print(f"Error processing Agent {agent.unique_id}: {str(e)}")
+                print(f"Error processing agent {agent.unique_id}: {str(e)}")
 
         self.phase = "voting"
-        print(f"Final votes: {self.votes}")
+        self.discussion_time = 5
+        print(f"Voting tally: {self.votes}")
 
     def check_isolated_death(self):
         """Check if death occurred in isolated location"""
@@ -235,18 +242,20 @@ class AmongUsModel(Model):
         """Reset round and clear voting data"""
         self.phase = "tasks"
         self.reported_body = None
-        self.votes = {}  # Now resetting votes each round
+        self.votes = {}
         self.discussion_time = 0
-        # Cleanup dead agents (safety net)
-        for agent in self.schedule.agents:
-            if isinstance(agent, Crewmate) and hasattr(agent, '_trace_file'):
-                agent._trace_file.close()
-                del agent._trace_file  # Ensures re-initialization next round
 
-        for agent in list(self.schedule.agents):  # Use list() to avoid iteration issues
+        # Cleanup dead agents and trace files
+        for agent in list(self.schedule.agents):
             if not agent.alive:
-                self.grid.remove_agent(agent)
-                self.schedule.remove(agent)
+                try:
+                    self.grid.remove_agent(agent)
+                    self.schedule.remove(agent)
+                    if isinstance(agent, Crewmate) and hasattr(agent, '_trace_file'):
+                        agent._trace_file.close()
+                        del agent._trace_file
+                except Exception as e:
+                    print(f"Cleanup error: {str(e)}")
             
 
     def tally_votes(self):
@@ -279,33 +288,33 @@ class AmongUsModel(Model):
         if self.game_over:
             return
         
+        # Tasks phase - agent movement
         if self.phase == "tasks":
             self.schedule.step()
-            # Check if body was reported
             if self.reported_body:
                 self.phase = "discussion"
-                self.discussion_time = 5  # 5 steps for discussion
-        
+                self.discussion_time = 5
+    
+        # Discussion phase
         elif self.phase == "discussion":
             if self.discussion_time > 0:
                 self.discussion_time -= 1
                 if self.discussion_time == 0:
-                    self.discussion_step()  # Move to voting after discussion
-        
+                    self.discussion_step()
+    
+        # Voting phase
         elif self.phase == "voting":
             if self.discussion_time > 0:
-                self.tally_votes()
-        
+                self.discussion_time -= 1
+                if self.discussion_time == 0:
+                    self.tally_votes()
+    
+        # Game state check
         alive_crewmates = sum(1 for a in self.schedule.agents 
-                         if isinstance(a, Crewmate) and a.alive)
+                            if isinstance(a, Crewmate) and a.alive)
         alive_imposters = sum(1 for a in self.schedule.agents 
                             if isinstance(a, Imposter) and a.alive)
-        
-        if alive_imposters == 0:
+    
+        if alive_imposters == 0 or alive_crewmates == 0:
             self.game_over = True
-            self.winner = "Crewmates"
-            print("GAME OVER - Crewmates win!")
-        elif alive_crewmates == 0:
-            self.game_over = True
-            self.winner = "Imposter"
-            print("GAME OVER - Imposter wins!")
+            print(f"GAME OVER - {'Crewmates' if alive_imposters == 0 else 'Imposter'} wins!")
