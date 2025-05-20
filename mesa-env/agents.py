@@ -95,6 +95,13 @@ class Crewmate(PlayerAgent):
         self._trace_file.write(
             f"Step {self.model.schedule.steps}: [{', '.join(sorted(trace_pairs))}]\n"
         )
+
+        trace_line = f"Step {self.model.schedule.steps}: "
+        trace_line += f"Alive({self.alive}), "
+        trace_line += f"Pos({self.pos}), "
+        trace_line += f"Visible: {[a.unique_id for a in visible_agents if a != self]}"
+        
+        self._trace_file.write(trace_line + "\n")
         self._trace_file.flush()
         
         # Debug output
@@ -134,6 +141,37 @@ class Crewmate(PlayerAgent):
                 self.model.phase = "discussion"
                 return True
         return False
+        
+    def generate_argument(self, discussion_manager, context):
+        try:
+            with open(f"agent_{self.unique_id}_trace.log", "r") as f:
+                trace_content = f.read()
+        except FileNotFoundError:
+            trace_content = ""
+            
+        prompt = discussion_manager.generate_crewmate_prompt(
+            self.unique_id, 
+            trace_content,
+            context
+        )
+        response = discussion_manager.llm.query_llm(prompt)
+        return discussion_manager.parse_response(response)
+
+
+    def get_dead_agent_pairs(self, dead_id):
+        """Extract suspicion pairs involving dead agent"""
+        return {
+            pair: data for pair, data in self.suspicion_pairs.items()
+            if dead_id in pair
+        }
+    
+    def calculate_heuristic_suspicion(self, suspect_id):
+        """Calculate suspicion based on observed pairs"""
+        return sum(
+            data["count"] 
+            for pair, data in self.suspicion_pairs.items()
+            if suspect_id in pair
+        )
 
     def step(self):
         if not self.alive:
@@ -183,6 +221,21 @@ class Imposter(PlayerAgent):
             target.alive = False
             self.kill_cooldown = 5
             print(f"Agent {target.unique_id} was killed!")
+    
+    def generate_argument(self, discussion_manager, context):
+        try:
+            with open(f"agent_{self.unique_id}_trace.log", "r") as f:
+                trace_content = f.read()
+        except FileNotFoundError:
+            trace_content = ""
+            
+        prompt = discussion_manager.generate_imposter_prompt(
+            self.unique_id,
+            trace_content,
+            context
+        )
+        response = discussion_manager.llm.query_llm(prompt)
+        return discussion_manager.parse_response(response)
 
     def step(self):
         if not self.alive:
