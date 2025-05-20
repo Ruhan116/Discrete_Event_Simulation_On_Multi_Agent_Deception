@@ -142,25 +142,19 @@ class Crewmate(PlayerAgent):
                 return True
         return False
         
-    def generate_argument(self, discussion_manager, dead_agent_id=None, death_location=None, suspicion_data=None):
+    def generate_argument(self, discussion_manager, context):
         try:
             with open(f"agent_{self.unique_id}_trace.log", "r") as f:
-                observations = f.read()[-2000:]
+                trace_content = f.read()
         except FileNotFoundError:
-            observations = "No observations"
+            trace_content = ""
             
         prompt = discussion_manager.generate_crewmate_prompt(
-            self.unique_id,
-            observations,
-            dead_agent_id,
-            death_location,
-            suspicion_data
+            self.unique_id, 
+            trace_content,
+            context
         )
-
-        response = discussion_manager.grok.query_grok(
-            prompt,
-            system_message="You are a crewmate in Among Us. Analyze behavior patterns to identify the imposter."
-        )
+        response = discussion_manager.llm.query_llm(prompt)
         return discussion_manager.parse_response(response)
 
 
@@ -228,16 +222,19 @@ class Imposter(PlayerAgent):
             self.kill_cooldown = 5
             print(f"Agent {target.unique_id} was killed!")
     
-    def generate_argument(self, discussion_manager, death_location=None, death_circumstances=None):
+    def generate_argument(self, discussion_manager, context):
+        try:
+            with open(f"agent_{self.unique_id}_trace.log", "r") as f:
+                trace_content = f.read()
+        except FileNotFoundError:
+            trace_content = ""
+            
         prompt = discussion_manager.generate_imposter_prompt(
             self.unique_id,
-            death_location,
-            death_circumstances
+            trace_content,
+            context
         )
-        response = discussion_manager.grok.query_grok(
-            prompt,
-            system_message="You are an imposter. Create convincing lies to frame others."
-        )
+        response = discussion_manager.llm.query_llm(prompt)
         return discussion_manager.parse_response(response)
 
     def step(self):
