@@ -4,9 +4,11 @@ from mesa.space import MultiGrid
 from agents import Crewmate, Imposter
 from call_label_agent import CellLabelAgent
 import random
+from llm_handler import DiscussionManager
+from config import GROK_API_KEY
 
 class AmongUsModel(Model):
-    def __init__(self, width=20, height=20, num_agents=10, num_imposters=1):
+    def __init__(self, width=20, height=20, num_agents=10, num_imposters=1, grok_api_key=GROK_API_KEY):
         super().__init__()
         self.grid = MultiGrid(width, height, torus=False)
         self.schedule = RandomActivation(self)
@@ -17,6 +19,7 @@ class AmongUsModel(Model):
         self.votes = {}
         self.game_over = False  # New game state flag
         self.winner = None  # "Crewmates" or "Imposter"
+        self.discussion_manager = DiscussionManager(grok_api_key)
         
         # Define rooms and hallways
         self.rooms = [
@@ -84,8 +87,8 @@ class AmongUsModel(Model):
                 return room[4]
         return "Hallway"
     
+    """
     def discussion_step(self):
-        """Process pairs containing the reported body, update votes, and clean up"""
         self.votes = {}  # Reset votes
         
         # Find the dead agent using persisted reported_body
@@ -152,6 +155,82 @@ class AmongUsModel(Model):
         self.phase = "voting"
         self.discussion_time = 5
         print(f"Voting tally: {self.votes}")
+    """
+
+    def discussion_step(self):
+        """Integrated discussion with death context and error handling"""
+        self.votes = {}
+
+        # Error handling for missing dead agent
+        self.dead_agent = next((a for a in self.schedule.agents 
+                              if hasattr(a, 'pos') and a.pos == self.reported_body and not a.alive), None)
+        if not self.dead_agent:
+            print("Error: No dead agent found at reported location!")
+            self.reset_round()
+            return
+
+        death_location = self.get_room(self.dead_agent.pos)
+        death_circumstances = "isolated area" if self.check_isolated_death() else "public area"
+
+        # Collect arguments with integrated data
+        for agent in self.schedule.agents:
+            if not agent.alive:
+                continue
+
+            if isinstance(agent, Crewmate):
+                # Call the method on the agent instance, not the dict
+                suspicion_data = agent.get_dead_agent_pairs(self.dead_agent.unique_id)
+                argument = agent.generate_argument(
+                    self.discussion_manager,
+                    dead_agent_id=self.dead_agent.unique_id,
+                    death_location=death_location,
+                    suspicion_data=suspicion_data
+                )
+            elif isinstance(agent, Imposter):
+                argument = agent.generate_argument(
+                    self.discussion_manager,
+                    death_location=death_location,
+                    death_circumstances=death_circumstances
+                )
+
+            # Combine LLM votes with heuristic suspicion weights
+            self.process_vote(agent, argument)
+
+        self.phase = "voting"
+        print(f"Final votes: {self.votes}")
+
+    def process_vote(self, agent, argument):
+        """Combine LLM arguments with heuristic suspicion data"""
+        if not argument or "suspect" not in argument:
+            return
+
+        try:
+            # Parse suspect from LLM response
+            suspect = argument["suspect"].replace("Agent ", "").strip()
+            suspect_id = int(suspect)
+
+            # Validate agent exists and is alive
+            target = next((a for a in self.schedule.agents 
+                          if a.unique_id == suspect_id and a.alive), None)
+            if not target:
+                return
+
+            # Add LLM vote
+            self.votes[suspect_id] = self.votes.get(suspect_id, 0) + 1
+            print(f"Agent {agent.unique_id} voted for {suspect_id}: {argument['reason']}")
+
+            # Add heuristic suspicion weights (from suspicion_pairs)
+            if isinstance(agent, Crewmate):
+                heuristic_weight = agent.calculate_heuristic_suspicion(suspect_id)
+                self.votes[suspect_id] += heuristic_weight
+
+        except (ValueError, KeyError) as e:
+            print(f"Invalid vote from Agent {agent.unique_id}: {e}")
+
+    def check_isolated_death(self):
+        """Check if death occurred in isolated location"""
+        neighbors = self.grid.get_neighbors(self.dead_agent.pos, moore=True, radius=2)
+        return len([a for a in neighbors if isinstance(a, (Crewmate, Imposter)) and a.alive]) < 2
 
     def reset_round(self):
         """Reset round and clear voting data"""
