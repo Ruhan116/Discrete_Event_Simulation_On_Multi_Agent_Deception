@@ -4,9 +4,11 @@ from mesa.space import MultiGrid
 from agents import Crewmate, Imposter
 from call_label_agent import CellLabelAgent
 import random
+from llm_handler import DiscussionManager
+from config import OPENAI_API_KEY
 
 class AmongUsModel(Model):
-    def __init__(self, width=20, height=20, num_agents=10, num_imposters=1):
+    def __init__(self, width=20, height=20, num_agents=10, num_imposters=1, openai_api_key=OPENAI_API_KEY):
         super().__init__()
         self.grid = MultiGrid(width, height, torus=False)
         self.schedule = RandomActivation(self)
@@ -17,6 +19,7 @@ class AmongUsModel(Model):
         self.votes = {}
         self.game_over = False  # New game state flag
         self.winner = None  # "Crewmates" or "Imposter"
+        self.discussion_manager = DiscussionManager(openai_api_key)
         
         # Define rooms and hallways
         self.rooms = [
@@ -84,8 +87,8 @@ class AmongUsModel(Model):
                 return room[4]
         return "Hallway"
     
+    """
     def discussion_step(self):
-        """Process pairs containing the reported body, update votes, and clean up"""
         self.votes = {}  # Reset votes
         
         # Find the dead agent using persisted reported_body
@@ -152,27 +155,113 @@ class AmongUsModel(Model):
         self.phase = "voting"
         self.discussion_time = 5
         print(f"Voting tally: {self.votes}")
+    """
+
+    def discussion_step(self):
+        """Process discussion phase with LLM integration"""
+        self.votes = {}
+
+        # Find dead agent with error handling
+        try:
+            dead_agent = next(a for a in self.schedule.agents 
+                            if a.pos == self.reported_body and not a.alive)
+        except StopIteration:
+            print("No dead agent found! Resetting round.")
+            self.reset_round()
+            return
+
+        # Capture death location BEFORE removal
+        death_location = self.get_room(dead_agent.pos)
+
+        # Remove dead agent properly
+        try:
+            self.grid.remove_agent(dead_agent)
+            self.schedule.remove(dead_agent)
+            if isinstance(dead_agent, Crewmate):
+                dead_agent.close_trace_file()
+        except Exception as e:
+            print(f"Error removing dead agent: {e}")
+
+        # Use captured location instead of dead_agent.pos
+        context = {
+            'dead_agent_id': dead_agent.unique_id,
+            'death_location': death_location,
+            'dead_suspicions': dead_agent.suspicion_pairs if isinstance(dead_agent, Crewmate) else {},
+            'alive_crewmates': [a.unique_id for a in self.schedule.agents 
+                              if isinstance(a, Crewmate) and a.alive]
+        }
+
+        # Collect arguments and votes
+        for agent in self.schedule.agents:
+            if not agent.alive:
+                continue
+            
+            try:
+                # Read individual trace file
+                trace_content = ""
+                try:
+                    with open(f"agent_{agent.unique_id}_trace.log", "r") as f:
+                        trace_content = f.read()[-1000:]  # Get last 1000 characters
+                except FileNotFoundError:
+                    pass
+
+                # Generate argument
+                argument = agent.generate_argument(self.discussion_manager, context)
+
+                # Process the argument
+                # Inside the agent processing loop of discussion_step()
+                if argument and "suspect" in argument:
+                    suspect_str = argument["suspect"].strip()
+                    try:
+                        suspect_id = int(''.join(filter(str.isdigit, suspect_str)))
+                        if any(a.unique_id == suspect_id for a in self.schedule.agents if a.alive):
+                            vote_weight = 1 + int(argument.get("confidence", 0)) // 25
+                            self.votes[suspect_id] = self.votes.get(suspect_id, 0) + vote_weight
+                            
+                            # Add this print statement
+                            print(f"Agent {agent.unique_id} reasoning: {argument.get('reason', 'No reason provided')}")
+                            
+                    except ValueError:
+                        print(f"Invalid suspect ID from Agent {agent.unique_id}: {suspect_str}")
+                    except Exception as e:
+                        print(f"Error processing Agent {agent.unique_id}: {str(e)}")
+
+            except Exception as e:
+                print(f"Error processing agent {agent.unique_id}: {str(e)}")
+
+        self.phase = "voting"
+        self.discussion_time = 5
+        print(f"Voting tally: {self.votes}")
+
+    def check_isolated_death(self):
+        """Check if death occurred in isolated location"""
+        neighbors = self.grid.get_neighbors(self.dead_agent.pos, moore=True, radius=2)
+        return len([a for a in neighbors if isinstance(a, (Crewmate, Imposter)) and a.alive]) < 2
 
     def reset_round(self):
         """Reset round and clear voting data"""
         self.phase = "tasks"
         self.reported_body = None
-        self.votes = {}  # Now resetting votes each round
+        self.votes = {}
         self.discussion_time = 0
-        # Cleanup dead agents (safety net)
-        for agent in self.schedule.agents:
-            if isinstance(agent, Crewmate) and hasattr(agent, '_trace_file'):
-                agent._trace_file.close()
-                del agent._trace_file  # Ensures re-initialization next round
 
-        for agent in list(self.schedule.agents):  # Use list() to avoid iteration issues
+        # Cleanup dead agents and trace files
+        for agent in list(self.schedule.agents):
             if not agent.alive:
-                self.grid.remove_agent(agent)
-                self.schedule.remove(agent)
+                try:
+                    self.grid.remove_agent(agent)
+                    self.schedule.remove(agent)
+                    if isinstance(agent, Crewmate) and hasattr(agent, '_trace_file'):
+                        agent._trace_file.close()
+                        del agent._trace_file
+                except Exception as e:
+                    print(f"Cleanup error: {str(e)}")
             
 
     def tally_votes(self):
         """Eject most-voted agent with proper tie-breaking"""
+
+        print("Tallying votes...")
         if not self.votes:
             print("No votes cast! Skipping to next round.")
             self.reset_round()
@@ -199,35 +288,33 @@ class AmongUsModel(Model):
         if self.game_over:
             return
         
+        # Tasks phase - agent movement
         if self.phase == "tasks":
             self.schedule.step()
-            # Check if body was reported
             if self.reported_body:
                 self.phase = "discussion"
-                self.discussion_time = 5  # 5 steps for discussion
-        
+                self.discussion_time = 5
+    
+        # Discussion phase
         elif self.phase == "discussion":
             if self.discussion_time > 0:
                 self.discussion_time -= 1
                 if self.discussion_time == 0:
-                    self.discussion_step()  # Move to voting after discussion
-        
+                    self.discussion_step()
+    
+        # Voting phase
         elif self.phase == "voting":
             if self.discussion_time > 0:
                 self.discussion_time -= 1
                 if self.discussion_time == 0:
                     self.tally_votes()
-        
+    
+        # Game state check
         alive_crewmates = sum(1 for a in self.schedule.agents 
-                         if isinstance(a, Crewmate) and a.alive)
+                            if isinstance(a, Crewmate) and a.alive)
         alive_imposters = sum(1 for a in self.schedule.agents 
                             if isinstance(a, Imposter) and a.alive)
-        
-        if alive_imposters == 0:
+    
+        if alive_imposters == 0 or alive_crewmates == 0:
             self.game_over = True
-            self.winner = "Crewmates"
-            print("GAME OVER - Crewmates win!")
-        elif alive_crewmates == 0:
-            self.game_over = True
-            self.winner = "Imposter"
-            print("GAME OVER - Imposter wins!")
+            print(f"GAME OVER - {'Crewmates' if alive_imposters == 0 else 'Imposter'} wins!")
