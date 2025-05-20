@@ -1,2 +1,4 @@
 # Ignore all trace log files
 mesa-env/agent_*_trace.log
+config.py
+__pycache__/

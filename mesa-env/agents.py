@@ -95,6 +95,13 @@ class Crewmate(PlayerAgent):
         self._trace_file.write(
             f"Step {self.model.schedule.steps}: [{', '.join(sorted(trace_pairs))}]\n"
         )
+
+        trace_line = f"Step {self.model.schedule.steps}: "
+        trace_line += f"Alive({self.alive}), "
+        trace_line += f"Pos({self.pos}), "
+        trace_line += f"Visible: {[a.unique_id for a in visible_agents if a != self]}"
+        
+        self._trace_file.write(trace_line + "\n")
         self._trace_file.flush()
         
         # Debug output
@@ -134,6 +141,43 @@ class Crewmate(PlayerAgent):
                 self.model.phase = "discussion"
                 return True
         return False
+        
+    def generate_argument(self, discussion_manager, dead_agent_id=None, death_location=None, suspicion_data=None):
+        try:
+            with open(f"agent_{self.unique_id}_trace.log", "r") as f:
+                observations = f.read()[-2000:]
+        except FileNotFoundError:
+            observations = "No observations"
+            
+        prompt = discussion_manager.generate_crewmate_prompt(
+            self.unique_id,
+            observations,
+            dead_agent_id,
+            death_location,
+            suspicion_data
+        )
+
+        response = discussion_manager.grok.query_grok(
+            prompt,
+            system_message="You are a crewmate in Among Us. Analyze behavior patterns to identify the imposter."
+        )
+        return discussion_manager.parse_response(response)
+
+
+    def get_dead_agent_pairs(self, dead_id):
+        """Extract suspicion pairs involving dead agent"""
+        return {
+            pair: data for pair, data in self.suspicion_pairs.items()
+            if dead_id in pair
+        }
+    
+    def calculate_heuristic_suspicion(self, suspect_id):
+        """Calculate suspicion based on observed pairs"""
+        return sum(
+            data["count"] 
+            for pair, data in self.suspicion_pairs.items()
+            if suspect_id in pair
+        )
 
     def step(self):
         if not self.alive:
@@ -183,6 +227,18 @@ class Imposter(PlayerAgent):
             target.alive = False
             self.kill_cooldown = 5
             print(f"Agent {target.unique_id} was killed!")
+    
+    def generate_argument(self, discussion_manager, death_location=None, death_circumstances=None):
+        prompt = discussion_manager.generate_imposter_prompt(
+            self.unique_id,
+            death_location,
+            death_circumstances
+        )
+        response = discussion_manager.grok.query_grok(
+            prompt,
+            system_message="You are an imposter. Create convincing lies to frame others."
+        )
+        return discussion_manager.parse_response(response)
 
     def step(self):
         if not self.alive:
