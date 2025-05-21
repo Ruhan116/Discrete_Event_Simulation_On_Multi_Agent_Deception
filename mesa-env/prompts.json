@@ -1,0 +1,10 @@
+{
+    "crewmate": {
+        "system": "You are a Crewmate in Among Us. Respond ONLY with valid JSON containing 'suspect' (NUMBER), 'reason' (string), and 'confidence' (0-100). Example: {\"suspect\": 5, \"reason\": \"...\", \"confidence\": 75}",
+        "user": "Analyze:\n- Observations: {trace_content}\n- Dead Agent: {dead_agent_id}\n- Location: {death_location}\n- Suspicions: {dead_suspicions}\n\nRespond with JSON:"
+    },
+    "imposter": {
+        "system": "You are an Imposter. Respond ONLY with valid JSON containing 'suspect' (NUMBER), 'reason' (string), and 'confidence' (0-100). Example: {\"suspect\": 3, \"reason\": \"...\", \"confidence\": 80}",
+        "user": "Create deception using:\n- Alibi: {trace_content}\n- Location: {death_location}\n- Crewmates: {alive_crewmates}\n\nRespond with JSON:"
+    }
+}
