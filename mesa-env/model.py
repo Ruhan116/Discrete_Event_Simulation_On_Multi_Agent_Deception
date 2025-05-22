@@ -4,13 +4,16 @@ from mesa.space import MultiGrid
 from agents import Crewmate, Imposter
 from call_label_agent import CellLabelAgent
 from llm_benchmark import OpenAILoader, GeminiLoader
+from llm_benchmark import OpenAILoader, GeminiLoader
 import random
 import json
 import os
 from dotenv import load_dotenv
 import re
-from llm_handler import DiscussionManager
-from config import OPENAI_API_KEY
+import json
+import os
+from dotenv import load_dotenv
+import re
 
 
 class AmongUsModel(Model):
@@ -150,6 +153,13 @@ class AmongUsModel(Model):
                 dead_agent.close_trace_file()
         except Exception as e:
             print(f"Error removing dead agent: {e}")
+
+        # Prepare context for LLM
+        dead_suspicions = {}
+        if isinstance(dead_agent, Crewmate):
+            for pair, data in dead_agent.suspicion_pairs.items():
+                key = f"Agents_{'_'.join(map(str, sorted(pair)))}"
+                dead_suspicions[key] = data
 
         # Prepare context for LLM
         dead_suspicions = {}
