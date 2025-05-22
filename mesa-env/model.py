@@ -310,11 +310,35 @@ class AmongUsModel(Model):
                     self.tally_votes()
     
         # Game state check
-        alive_crewmates = sum(1 for a in self.schedule.agents 
-                            if isinstance(a, Crewmate) and a.alive)
-        alive_imposters = sum(1 for a in self.schedule.agents 
-                            if isinstance(a, Imposter) and a.alive)
-    
-        if alive_imposters == 0 or alive_crewmates == 0:
+        alive_crewmates = sum(1 for a in self.schedule.agents
+                              if isinstance(a, Crewmate) and a.alive)
+        alive_imposters = sum(1 for a in self.schedule.agents
+                              if isinstance(a, Imposter) and a.alive)
+
+        # 1) Win by elimination
+        if alive_imposters == 0:
             self.game_over = True
-            print(f"GAME OVER - {'Crewmates' if alive_imposters == 0 else 'Imposter'} wins!")
+            self.running  = False
+            self.winner = "Crewmates"
+            print("GAME OVER - Crewmates win by eliminating all imposters!")
+            return
+        if alive_crewmates == 0:
+            self.game_over = True
+            self.running  = False
+            self.winner = "Imposter"
+            print("GAME OVER - Imposter wins by eliminating all crewmates!")
+            return
+
+        # 2) Win by task completion
+        all_tasks_done = all(
+            task.complete
+            for agent in self.schedule.agents
+            if isinstance(agent, Crewmate)
+            for task in agent.tasks
+        )
+        if all_tasks_done:
+            self.game_over = True
+            self.running  = False
+            self.winner = "Crewmates"
+            print("GAME OVER - Crewmates win! All tasks have been completed.")
+            return
