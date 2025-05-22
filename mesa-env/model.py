@@ -4,20 +4,17 @@ from mesa.space import MultiGrid
 from agents import Crewmate, Imposter
 from call_label_agent import CellLabelAgent
 from llm_benchmark import OpenAILoader, GeminiLoader
-from llm_benchmark import OpenAILoader, GeminiLoader
 import random
 import json
 import os
 from dotenv import load_dotenv
 import re
-import json
-import os
-from dotenv import load_dotenv
-import re
+from llm_handler import DiscussionManager
+from config import OPENAI_API_KEY
 
 
 class AmongUsModel(Model):
-    def __init__(self, width=20, height=20, num_agents=10, num_imposters=1, llm_type="gemini"):
+    def __init__(self, width=20, height=20, num_agents=10, num_imposters=1, llm_type="gemini", openai_api_key=OPENAI_API_KEY):
         super().__init__()
         # Load environment variables
         load_dotenv()
