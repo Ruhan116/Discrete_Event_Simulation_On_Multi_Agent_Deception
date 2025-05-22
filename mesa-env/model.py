@@ -9,9 +9,12 @@ import json
 import os
 from dotenv import load_dotenv
 import re
+from llm_handler import DiscussionManager
+from config import OPENAI_API_KEY
+
 
 class AmongUsModel(Model):
-    def __init__(self, width=20, height=20, num_agents=10, num_imposters=1, llm_type="gemini"):
+    def __init__(self, width=20, height=20, num_agents=10, num_imposters=1, llm_type="gemini", openai_api_key=OPENAI_API_KEY):
         super().__init__()
         # Load environment variables
         load_dotenv()
@@ -122,7 +125,7 @@ class AmongUsModel(Model):
                 return room[4]
         return "Hallway"
     
-    """
+
     def discussion_step(self):
         """Process discussion phase with LLM integration"""
         self.votes = {}
@@ -147,6 +150,13 @@ class AmongUsModel(Model):
                 dead_agent.close_trace_file()
         except Exception as e:
             print(f"Error removing dead agent: {e}")
+
+        # Prepare context for LLM
+        dead_suspicions = {}
+        if isinstance(dead_agent, Crewmate):
+            for pair, data in dead_agent.suspicion_pairs.items():
+                key = f"Agents_{'_'.join(map(str, sorted(pair)))}"
+                dead_suspicions[key] = data
 
         # Prepare context for LLM
         dead_suspicions = {}
@@ -215,7 +225,6 @@ class AmongUsModel(Model):
         print(f"Voting tally: {self.votes}")
 
     def check_isolated_death(self):
-        """Check if death occurred in isolated location"""
         neighbors = self.grid.get_neighbors(self.dead_agent.pos, moore=True, radius=2)
         return len([a for a in neighbors if isinstance(a, (Crewmate, Imposter)) and a.alive]) < 2
 
@@ -240,7 +249,6 @@ class AmongUsModel(Model):
         print(f"\n=== Round reset at step {self.schedule.steps} ===")
 
     def tally_votes(self):
-        """Eject most-voted agent with proper tie-breaking"""
 
         print("Tallying votes...")
         if not self.votes:
@@ -266,43 +274,60 @@ class AmongUsModel(Model):
         self.reset_round()
 
     def step(self):
-        try:
-            if self.game_over:
-                return
+        if self.game_over:
+            return
+        
+        # Tasks phase - agent movement
+        if self.phase == "tasks":
+            self.schedule.step()
+            if self.reported_body:
+                self.phase = "discussion"
+                self.discussion_time = 5
+    
+        # Discussion phase
+        elif self.phase == "discussion":
+            if self.discussion_time > 0:
+                self.discussion_time -= 1
+                if self.discussion_time == 0:
+                    self.discussion_step()
+    
+        # Voting phase
+        elif self.phase == "voting":
+            if self.discussion_time > 0:
+                self.discussion_time -= 1
+                if self.discussion_time == 0:
+                    self.tally_votes()
+    
+        # Game state check
+        alive_crewmates = sum(1 for a in self.schedule.agents
+                              if isinstance(a, Crewmate) and a.alive)
+        alive_imposters = sum(1 for a in self.schedule.agents
+                              if isinstance(a, Imposter) and a.alive)
 
-            if self.phase == "tasks":
-                self.schedule.step()
-                # Check if body was reported
-                if self.reported_body:
-                    self.phase = "discussion"
-                    self.discussion_time = 5  # 5 steps for discussion
-            
-            elif self.phase == "discussion":
-                if self.discussion_time > 0:
-                    self.discussion_time -= 1
-                    if self.discussion_time == 0:
-                        self.discussion_step()  # Move to voting after discussion
-            
-            elif self.phase == "voting":
-                if self.discussion_time > 0:
-                    self.discussion_time -= 1
-                    if self.discussion_time == 0:
-                        self.tally_votes()
-            
-            alive_crewmates = sum(1 for a in self.schedule.agents 
-                             if isinstance(a, Crewmate) and a.alive)
-            alive_imposters = sum(1 for a in self.schedule.agents 
-                                if isinstance(a, Imposter) and a.alive)
-            
-            if alive_imposters == 0:
-                self.game_over = True
-                self.winner = "Crewmates"
-                print("GAME OVER - Crewmates win!")
-            elif alive_crewmates == 0:
-                self.game_over = True
-                self.winner = "Imposter"
-                print("GAME OVER - Imposter wins!")
-                
-        except Exception as e:
-            print(f"Critical error in step: {str(e)}")
-            self.running = False
+        # 1) Win by elimination
+        if alive_imposters == 0:
+            self.game_over = True
+            self.running  = False
+            self.winner = "Crewmates"
+            print("GAME OVER - Crewmates win by eliminating all imposters!")
+            return
+        if alive_crewmates == 0:
+            self.game_over = True
+            self.running  = False
+            self.winner = "Imposter"
+            print("GAME OVER - Imposter wins by eliminating all crewmates!")
+            return
+
+        # 2) Win by task completion
+        all_tasks_done = all(
+            task.complete
+            for agent in self.schedule.agents
+            if isinstance(agent, Crewmate)
+            for task in agent.tasks
+        )
+        if all_tasks_done:
+            self.game_over = True
+            self.running  = False
+            self.winner = "Crewmates"
+            print("GAME OVER - Crewmates win! All tasks have been completed.")
+            return
