@@ -129,6 +129,22 @@ class Crewmate(PlayerAgent):
             task.do_task()
             if task.complete:
                 print(f"Agent {self.unique_id} completed {task.name}!")
+                
+                # Check if this agent has completed all their tasks
+                if all(t.complete for t in self.tasks):
+                    print(f"\nAgent {self.unique_id} has completed all their tasks!")
+                    # List remaining agents with incomplete tasks
+                    agents_with_tasks = [
+                        a for a in self.model.schedule.agents
+                        if isinstance(a, Crewmate) and a.alive and not all(t.complete for t in a.tasks)
+                    ]
+                    if agents_with_tasks:
+                        print("Agents still with incomplete tasks:")
+                        for agent in agents_with_tasks:
+                            incomplete = sum(1 for t in agent.tasks if not t.complete)
+                            print(f"- Agent {agent.unique_id}: {incomplete} tasks remaining")
+                    else:
+                        print("All alive crewmates have completed their tasks!")
 
     
     def check_for_bodies(self, visible_agents):

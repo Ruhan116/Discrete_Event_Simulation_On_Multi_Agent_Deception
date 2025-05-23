@@ -9,19 +9,16 @@ import json
 import os
 from dotenv import load_dotenv
 import re
-from llm_handler import DiscussionManager
-from config import OPENAI_API_KEY
-
 
 class AmongUsModel(Model):
-    def __init__(self, width=20, height=20, num_agents=10, num_imposters=1, llm_type="gemini", openai_api_key=OPENAI_API_KEY):
+    def __init__(self, width=20, height=20, num_agents=10, num_imposters=1, llm_type="gemini", openai_model="gemini-2.0-flash"):
         super().__init__()
         # Load environment variables
         load_dotenv()
         
         # Initialize LLM
         if llm_type == "openai":
-            self.llm = OpenAILoader(os.getenv("OPENAI_KEY"))
+            self.llm = OpenAILoader(os.getenv("OPENAI_KEY"), model=openai_model)
         elif llm_type == "gemini":
             self.llm = GeminiLoader(os.getenv("GEMINI_KEY"))
         else:
@@ -40,7 +37,7 @@ class AmongUsModel(Model):
         self.votes = {}
         self.game_over = False  # New game state flag
         self.winner = None  # "Crewmates" or "Imposter"
-        self.discussion_manager = DiscussionManager(openai_api_key)
+        self.running = True  # New game state flag
         
         # Define rooms and hallways
         self.rooms = [
@@ -94,18 +91,22 @@ class AmongUsModel(Model):
     def generate_argument(self, agent, context):
         role = "imposter" if isinstance(agent, Imposter) else "crewmate"
         try:
-            response = self.llm.query_llm(
-                self.prompts[role]["user"].format(**context),
-                self.prompts[role]["system"]
+            # Format the prompt template with safe defaults
+            prompt_template = self.prompts[role]["user"].format(
+                trace_content=context.get('trace_content', ''),
+                dead_agent_id=context.get('dead_agent_id', 'Unknown'),
+                death_location=context.get('death_location', 'Unknown'),
+                dead_suspicions=context.get('dead_suspicions', {}),
+                alive_crewmates=context.get('alive_crewmates', [])
             )
+            system_msg = self.prompts[role]["system"]
             
-            parsed = self.llm.parse_response(response)
-            if parsed and "reason" in parsed:
-                print(f"Agent {agent.unique_id} ({role}): {parsed['reason']}")
-            return parsed
-            
+            response = self.llm.query_llm(prompt_template, system_msg)
+            parsed_response = self.llm.parse_response(response)
+            if parsed_response:
+                print(f"Agent {agent.unique_id} argument: {parsed_response}")
+            return parsed_response
         except Exception as e:
-            print(f"Argument generation failed for Agent {agent.unique_id}: {str(e)}")
             return None
 
     def is_valid_position(self, pos):
@@ -125,7 +126,6 @@ class AmongUsModel(Model):
                 return room[4]
         return "Hallway"
     
-
     def discussion_step(self):
         """Process discussion phase with LLM integration"""
         self.votes = {}
@@ -152,23 +152,10 @@ class AmongUsModel(Model):
             print(f"Error removing dead agent: {e}")
 
         # Prepare context for LLM
-        dead_suspicions = {}
-        if isinstance(dead_agent, Crewmate):
-            for pair, data in dead_agent.suspicion_pairs.items():
-                key = f"Agents_{'_'.join(map(str, sorted(pair)))}"
-                dead_suspicions[key] = data
-
-        # Prepare context for LLM
-        dead_suspicions = {}
-        if isinstance(dead_agent, Crewmate):
-            for pair, data in dead_agent.suspicion_pairs.items():
-                key = f"Agents_{'_'.join(map(str, sorted(pair)))}"
-                dead_suspicions[key] = data
-
         context = {
             'dead_agent_id': dead_agent.unique_id,
             'death_location': death_location,
-            'dead_suspicions': dead_suspicions,  # Use converted dict
+            'dead_suspicions': dead_agent.suspicion_pairs if isinstance(dead_agent, Crewmate) else {},
             'alive_crewmates': [a.unique_id for a in self.schedule.agents 
                               if isinstance(a, Crewmate) and a.alive]
         }
@@ -195,24 +182,27 @@ class AmongUsModel(Model):
 
                 # Process the argument
                 if argument and "suspect" in argument:
+                    print(f"Raw argument from Agent {agent.unique_id}: {argument}")  # Debug raw argument
+                    # Handle numeric extraction safely
+                    suspect_str = str(argument["suspect"]).strip()
+                    print(f"Suspect string before processing: '{suspect_str}'")  # Debug suspect string
                     try:
-                        # Handle both numeric and "Agent X" formats
-                        suspect_str = str(argument["suspect"]).strip()
-                        suspect_id = int(re.sub(r'\D', '', suspect_str))  # Extract numbers only
-                        
-                        # Validate agent exists and is alive
-                        target_agent = next((a for a in self.schedule.agents 
-                                           if a.unique_id == suspect_id and a.alive), None)
-                        
-                        if target_agent:
-                            self.votes[suspect_id] = self.votes.get(suspect_id, 0) + 1
-                            print(f"Agent {agent.unique_id} voted for {suspect_id}. Reason: {argument.get('reason', 'No reason')}")
+                        match = re.search(r'\d+', suspect_str)
+                        if match:
+                            suspect_id = int(match.group())
+                            print(f"Found suspect ID: {suspect_id}")  # Debug found ID
                         else:
-                            print(f"Invalid target from Agent {agent.unique_id}: {suspect_str}")
-                            
+                            print(f"No number found in suspect string: '{suspect_str}'")  # Debug no match
+                            suspect_id = -1
                     except Exception as e:
-                        print(f"Error processing suspect ID: {str(e)}")
-                        print(f"Raw suspect value: {argument['suspect']}")
+                        print(f"Error extracting suspect ID: {str(e)}")  # Debug extraction error
+                        suspect_id = -1
+
+                    if suspect_id != -1 and any(a.unique_id == suspect_id for a in self.schedule.agents if a.alive):
+                        self.votes[suspect_id] = self.votes.get(suspect_id, 0) + 1
+                        print(f"Agent {agent.unique_id} reasoning: {argument.get('reason', 'No reason provided')}")
+                    else:
+                        print(f"Invalid suspect ID from Agent {agent.unique_id}: {suspect_str} (ID: {suspect_id})")
 
             except Exception as e:
                 print(f"Error processing agent {agent.unique_id}: {str(e)}")
@@ -224,33 +214,26 @@ class AmongUsModel(Model):
         self.discussion_time = 5
         print(f"Voting tally: {self.votes}")
 
-    def check_isolated_death(self):
-        neighbors = self.grid.get_neighbors(self.dead_agent.pos, moore=True, radius=2)
-        return len([a for a in neighbors if isinstance(a, (Crewmate, Imposter)) and a.alive]) < 2
-
     def reset_round(self):
-        # Clear votes and phase
+        """Reset round and clear voting data"""
         self.phase = "tasks"
         self.reported_body = None
-        self.votes = {}
-        
-        # Reopen trace files for alive agents
+        self.votes = {}  # Now resetting votes each round
+        self.discussion_time = 0
+        # Cleanup dead agents (safety net)
         for agent in self.schedule.agents:
-            if isinstance(agent, Crewmate) and agent.alive:
-                if hasattr(agent, '_trace_file') and agent._trace_file.closed:
-                    agent._trace_file = open(f"agent_{agent.unique_id}_trace.log", "a")
-                
-        # Remove dead agents
-        for agent in list(self.schedule.agents):
+            if isinstance(agent, Crewmate) and hasattr(agent, '_trace_file'):
+                agent._trace_file.close()
+                del agent._trace_file  # Ensures re-initialization next round
+
+        for agent in list(self.schedule.agents):  # Use list() to avoid iteration issues
             if not agent.alive:
                 self.grid.remove_agent(agent)
                 self.schedule.remove(agent)
-        
-        print(f"\n=== Round reset at step {self.schedule.steps} ===")
+            
 
     def tally_votes(self):
-
-        print("Tallying votes...")
+        """Eject most-voted agent with proper tie-breaking"""
         if not self.votes:
             print("No votes cast! Skipping to next round.")
             self.reset_round()
@@ -275,45 +258,44 @@ class AmongUsModel(Model):
 
     def step(self):
         if self.game_over:
+            self.running = False  # Stop the simulation
             return
         
-        # Tasks phase - agent movement
         if self.phase == "tasks":
             self.schedule.step()
+            # Check if body was reported
             if self.reported_body:
                 self.phase = "discussion"
-                self.discussion_time = 5
-    
-        # Discussion phase
+                self.discussion_time = 5  # 5 steps for discussion
+        
         elif self.phase == "discussion":
             if self.discussion_time > 0:
                 self.discussion_time -= 1
                 if self.discussion_time == 0:
-                    self.discussion_step()
-    
-        # Voting phase
+                    self.discussion_step()  # Move to voting after discussion
+        
         elif self.phase == "voting":
             if self.discussion_time > 0:
                 self.discussion_time -= 1
                 if self.discussion_time == 0:
                     self.tally_votes()
-    
+        
         # Game state check
-        alive_crewmates = sum(1 for a in self.schedule.agents
-                              if isinstance(a, Crewmate) and a.alive)
-        alive_imposters = sum(1 for a in self.schedule.agents
-                              if isinstance(a, Imposter) and a.alive)
+        alive_crewmates = sum(1 for a in self.schedule.agents 
+                         if isinstance(a, Crewmate) and a.alive)
+        alive_imposters = sum(1 for a in self.schedule.agents 
+                            if isinstance(a, Imposter) and a.alive)
 
         # 1) Win by elimination
         if alive_imposters == 0:
             self.game_over = True
-            self.running  = False
+            self.running = False  # Stop the simulation
             self.winner = "Crewmates"
             print("GAME OVER - Crewmates win by eliminating all imposters!")
             return
         if alive_crewmates == 0:
             self.game_over = True
-            self.running  = False
+            self.running = False  # Stop the simulation
             self.winner = "Imposter"
             print("GAME OVER - Imposter wins by eliminating all crewmates!")
             return
@@ -322,12 +304,12 @@ class AmongUsModel(Model):
         all_tasks_done = all(
             task.complete
             for agent in self.schedule.agents
-            if isinstance(agent, Crewmate)
+            if isinstance(agent, Crewmate) and agent.alive
             for task in agent.tasks
         )
         if all_tasks_done:
             self.game_over = True
-            self.running  = False
+            self.running = False  # Stop the simulation
             self.winner = "Crewmates"
             print("GAME OVER - Crewmates win! All tasks have been completed.")
             return
